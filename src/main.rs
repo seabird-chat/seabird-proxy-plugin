@@ -30,6 +30,7 @@ pub mod proto {
 struct ProxiedChannel {
     source: String,
     target: String,
+    user_prefix: Option<String>,
     user_suffix: Option<String>,
 }
 
@@ -53,6 +54,7 @@ async fn read_config(filename: &str) -> Result<BTreeMap<String, Vec<client::Chan
             .or_insert_with(Vec::new)
             .push(client::ChannelTarget::new(
                 channel.target,
+                channel.user_prefix,
                 channel.user_suffix,
             ));
     }
@@ -97,7 +99,7 @@ async fn main() -> error::Result<()> {
 
     client.set_proxied_channels(proxied_channels).await;
 
-    // Spawn our token reader task
+    // Spawn our config reader task
     let mut signal_stream = signal(SignalKind::hangup())?;
     let config_client = client.clone();
     tokio::spawn(async move {

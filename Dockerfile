@@ -23,4 +23,4 @@ FROM debian:buster-slim
 ENV RUST_LOG=info
 RUN apt-get update && apt-get install -y libssl1.1 ca-certificates && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /usr/local/bin/seabird-proxy-plugin /usr/local/bin/seabird-proxy-plugin
-CMD ["seabird"]
+CMD ["seabird-proxy-plugin"]

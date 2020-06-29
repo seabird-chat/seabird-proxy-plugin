@@ -26,16 +26,21 @@ impl ClientConfig {
 #[derive(Debug)]
 pub struct ChannelTarget {
     id: String,
+    user_prefix: Option<String>,
     user_suffix: Option<String>,
 }
 
 impl ChannelTarget {
-    pub fn new(id: String, user_suffix: Option<String>) -> Self {
-        ChannelTarget { id, user_suffix }
+    pub fn new(id: String, user_prefix: Option<String>, user_suffix: Option<String>) -> Self {
+        ChannelTarget {
+            id,
+            user_prefix,
+            user_suffix,
+        }
     }
 }
 
-// Client represents the running bot.
+// Client represents the running proxy
 #[derive(Debug)]
 pub struct Client {
     config: ClientConfig,
@@ -131,8 +136,8 @@ impl Client {
                     .ok_or_else(|| format_err!("event missing user"))?;
                 let text = action.text;
 
-                self.send_msg(source.channel_id, |suffix| {
-                    format!("* {}{} {}", user.display_name, suffix, text)
+                self.send_msg(source.channel_id, |prefix, suffix| {
+                    format!("* {}{}{} {}", prefix, user.display_name, suffix, text)
                 })
                 .await;
             }
@@ -147,8 +152,8 @@ impl Client {
                     .ok_or_else(|| format_err!("event missing user"))?;
                 let text = message.text;
 
-                self.send_msg(source.channel_id, |suffix| {
-                    format!("{}{}: {}", user.display_name, suffix, text)
+                self.send_msg(source.channel_id, |prefix, suffix| {
+                    format!("{}{}{}: {}", prefix, user.display_name, suffix, text)
                 })
                 .await;
             }
@@ -167,13 +172,16 @@ impl Client {
 
                 // TODO: maybe pull command prefix from some other API?
                 if arg != "" {
-                    self.send_msg(source.channel_id, |suffix| {
-                        format!("{}{}: !{} {}", user.display_name, suffix, cmd, arg)
+                    self.send_msg(source.channel_id, |prefix, suffix| {
+                        format!(
+                            "{}{}{}: !{} {}",
+                            prefix, user.display_name, suffix, cmd, arg
+                        )
                     })
                     .await;
                 } else {
-                    self.send_msg(source.channel_id, |suffix| {
-                        format!("{}{}: !{}", user.display_name, suffix, cmd)
+                    self.send_msg(source.channel_id, |prefix, suffix| {
+                        format!("{}{}{}: !{}", prefix, user.display_name, suffix, cmd)
                     })
                     .await;
                 }
@@ -191,8 +199,11 @@ impl Client {
 
                 let nick = self.get_current_nick().await?;
 
-                self.send_msg(source.channel_id, |suffix| {
-                    format!("{}{}: {} {}", user.display_name, suffix, nick, text)
+                self.send_msg(source.channel_id, |prefix, suffix| {
+                    format!(
+                        "{}{}{}: {} {}",
+                        prefix, user.display_name, suffix, nick, text
+                    )
                 })
                 .await;
             }
@@ -210,13 +221,16 @@ impl Client {
 
     async fn send_msg<T>(&self, source: String, cb: T)
     where
-        T: Fn(&str) -> String,
+        T: Fn(&str, &str) -> String,
     {
         if let Some(channels) = self.proxied_channels.read().await.get(&source) {
             let mut inner = self.inner.lock().await;
 
             for channel in channels.iter() {
-                let text = cb(channel.user_suffix.as_deref().unwrap_or(""));
+                let text = cb(
+                    channel.user_prefix.as_deref().unwrap_or(""),
+                    channel.user_suffix.as_deref().unwrap_or(""),
+                );
 
                 debug!("Proxying {} to {}", text, channel.id);
 
