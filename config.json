@@ -2,13 +2,8 @@
   "proxied_channels": [
     {
       "source": "irc://seabird/%23encoded%2Dtest",
-      "target": "discord://seabird/721047808077070446",
-      "user_suffix": " (IRC)"
-    },
-    {
-      "source": "discord://seabird/721047808077070446",
       "target": "irc://seabird/%23encoded%2Dtest",
-      "user_suffix": " (Discord)"
+      "user_suffix": " (PROXY)"
     }
   ]
 }

@@ -15,11 +15,12 @@ use crate::proto::seabird::seabird_client::SeabirdClient;
 pub struct ClientConfig {
     pub url: String,
     pub token: String,
+    pub tag: String,
 }
 
 impl ClientConfig {
-    pub fn new(url: String, token: String) -> Self {
-        ClientConfig { url, token }
+    pub fn new(url: String, token: String, tag: String) -> Self {
+        ClientConfig { url, token, tag }
     }
 }
 
@@ -92,6 +93,8 @@ impl Client {
     }
 
     pub async fn run(&self) -> Result<()> {
+        debug!("Getting stream");
+
         let mut stream = {
             // We need to make sure the lock is dropped, so we can use the
             // client to make requests later.
@@ -104,6 +107,8 @@ impl Client {
                 .await?
                 .into_inner()
         };
+
+        debug!("Got stream");
 
         while let Some(event) = stream.next().await.transpose()? {
             info!("<-- {:?}", event);
@@ -201,20 +206,62 @@ impl Client {
 
                 self.send_msg(source.channel_id, |prefix, suffix| {
                     format!(
-                        "{}{}{}: {} {}",
+                        "{}{}{}: {}: {}",
                         prefix, user.display_name, suffix, nick, text
                     )
                 })
                 .await;
             }
 
+            // Seabird-sent events
+            SeabirdEvent::SendMessage(message) => {
+                if message.sender == self.config.tag {
+                    debug!(
+                        "Skipping Send Message from {}: {:?}",
+                        message.sender, message
+                    );
+                    return Ok(());
+                }
+
+                info!("Send Message: {:?}", message);
+
+                let inner = message
+                    .inner
+                    .ok_or_else(|| format_err!("event missing inner"))?;
+
+                self.send_raw_msg(inner.channel_id.clone(), inner.text)
+                    .await;
+            }
+            SeabirdEvent::PerformAction(action) => {
+                if action.sender == self.config.tag {
+                    debug!(
+                        "Skipping Perform Action from {}: {:?}",
+                        action.sender, action
+                    );
+                    return Ok(());
+                }
+
+                info!("Perform Action: {:?}", action);
+
+                let inner = action
+                    .inner
+                    .ok_or_else(|| format_err!("event missing inner"))?;
+
+                self.perform_raw_action(inner.channel_id.clone(), inner.text)
+                    .await;
+            }
+
             // Ignore all private message types as we can't proxy those.
-            SeabirdEvent::PrivateMessage(_) | SeabirdEvent::PrivateAction(_) => {}
+            SeabirdEvent::PrivateMessage(_)
+            | SeabirdEvent::PrivateAction(_)
+            | SeabirdEvent::SendPrivateMessage(_)
+            | SeabirdEvent::PerformPrivateAction(_) => {}
         }
 
         Ok(())
     }
 
+    // TODO: make this better - this should probably be actually implemented
     async fn get_current_nick(&self) -> Result<String> {
         Ok("seabird".to_string())
     }
@@ -244,6 +291,53 @@ impl Client {
                     error!("Failed to send message to channel {}: {}", channel.id, err);
                 } else {
                     debug!("Proxied message to {}", channel.id);
+                }
+            }
+        }
+    }
+
+    async fn send_raw_msg(&self, source: String, text: String) {
+        if let Some(channels) = self.proxied_channels.read().await.get(&source) {
+            let mut inner = self.inner.lock().await;
+
+            for channel in channels.iter() {
+                debug!("Sending {} to {}", text, channel.id);
+
+                if let Err(err) = inner
+                    .send_message(proto::SendMessageRequest {
+                        channel_id: channel.id.clone(),
+                        text: text.clone(),
+                    })
+                    .await
+                {
+                    error!("Failed to send message to channel {}: {}", channel.id, err);
+                } else {
+                    debug!("Sent message to {}", channel.id);
+                }
+            }
+        }
+    }
+
+    async fn perform_raw_action(&self, source: String, text: String) {
+        if let Some(channels) = self.proxied_channels.read().await.get(&source) {
+            let mut inner = self.inner.lock().await;
+
+            for channel in channels.iter() {
+                debug!("Sending {} to {}", text, channel.id);
+
+                if let Err(err) = inner
+                    .perform_action(proto::PerformActionRequest {
+                        channel_id: channel.id.clone(),
+                        text: text.clone(),
+                    })
+                    .await
+                {
+                    error!(
+                        "Failed to perform action on channel {}: {}",
+                        channel.id, err
+                    );
+                } else {
+                    debug!("Performed action on {}", channel.id);
                 }
             }
         }
