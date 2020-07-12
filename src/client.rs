@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use http::Uri;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{mpsc, Mutex, RwLock};
 use tonic::{
     metadata::{Ascii, MetadataValue},
     transport::{Channel, ClientTlsConfig},
@@ -22,6 +22,12 @@ impl ClientConfig {
     pub fn new(url: String, token: String, tag: String) -> Self {
         ClientConfig { url, token, tag }
     }
+}
+
+#[derive(Debug)]
+enum OutgoingMessage {
+    Action(proto::PerformActionRequest),
+    Message(proto::SendMessageRequest),
 }
 
 #[derive(Debug)]
@@ -93,6 +99,17 @@ impl Client {
     }
 
     pub async fn run(&self) -> Result<()> {
+        // We want a fairly large queue because these messages are small and
+        // sometimes we'll be proxying to multiple channels.
+        let (writer, reader) = mpsc::channel(100);
+        futures::future::try_join(self.run_reader(writer), self.run_writer(reader)).await?;
+
+        Err(format_err!("run exited early"))
+    }
+}
+
+impl Client {
+    async fn run_reader(&self, mut queue: mpsc::Sender<OutgoingMessage>) -> Result<()> {
         debug!("Getting stream");
 
         let mut stream = {
@@ -114,7 +131,7 @@ impl Client {
             info!("<-- {:?}", event);
 
             if let Some(inner) = event.inner {
-                match self.handle_event(inner).await {
+                match self.handle_event(&mut queue, inner).await {
                     Err(err) => error!("failed to handle event: {}", err),
                     _ => {}
                 }
@@ -123,12 +140,32 @@ impl Client {
             }
         }
 
-        Err(format_err!("run exited early"))
+        Err(format_err!("run_reader exited early"))
     }
-}
 
-impl Client {
-    async fn handle_event(&self, event: SeabirdEvent) -> Result<()> {
+    async fn run_writer(&self, mut queue: mpsc::Receiver<OutgoingMessage>) -> Result<()> {
+        loop {
+            match queue.recv().await {
+                Some(OutgoingMessage::Action(action)) => {
+                    let mut inner = self.inner.lock().await;
+                    debug!("Performing action {} on {}", action.text, action.channel_id);
+                    inner.perform_action(action).await?;
+                }
+                Some(OutgoingMessage::Message(message)) => {
+                    let mut inner = self.inner.lock().await;
+                    debug!("Sending message {} to {}", message.text, message.channel_id);
+                    inner.send_message(message).await?;
+                }
+                None => return Err(format_err!("run_writer exited early")),
+            }
+        }
+    }
+
+    async fn handle_event(
+        &self,
+        queue: &mut mpsc::Sender<OutgoingMessage>,
+        event: SeabirdEvent,
+    ) -> Result<()> {
         match event {
             SeabirdEvent::Action(action) => {
                 info!("Action: {:?}", action);
@@ -141,10 +178,10 @@ impl Client {
                     .ok_or_else(|| format_err!("event missing user"))?;
                 let text = action.text;
 
-                self.send_msg(source.channel_id, |prefix, suffix| {
+                self.send_msg(queue, source.channel_id, |prefix, suffix| {
                     format!("* {}{}{} {}", prefix, user.display_name, suffix, text)
                 })
-                .await;
+                .await?;
             }
             SeabirdEvent::Message(message) => {
                 info!("Message: {:?}", message);
@@ -157,10 +194,10 @@ impl Client {
                     .ok_or_else(|| format_err!("event missing user"))?;
                 let text = message.text;
 
-                self.send_msg(source.channel_id, |prefix, suffix| {
+                self.send_msg(queue, source.channel_id, |prefix, suffix| {
                     format!("{}{}{}: {}", prefix, user.display_name, suffix, text)
                 })
-                .await;
+                .await?;
             }
             SeabirdEvent::Command(command) => {
                 info!("Command: {:?}", command);
@@ -177,18 +214,18 @@ impl Client {
 
                 // TODO: maybe pull command prefix from some other API?
                 if arg != "" {
-                    self.send_msg(source.channel_id, |prefix, suffix| {
+                    self.send_msg(queue, source.channel_id, |prefix, suffix| {
                         format!(
                             "{}{}{}: !{} {}",
                             prefix, user.display_name, suffix, cmd, arg
                         )
                     })
-                    .await;
+                    .await?;
                 } else {
-                    self.send_msg(source.channel_id, |prefix, suffix| {
+                    self.send_msg(queue, source.channel_id, |prefix, suffix| {
                         format!("{}{}{}: !{}", prefix, user.display_name, suffix, cmd)
                     })
-                    .await;
+                    .await?;
                 }
             }
             SeabirdEvent::Mention(mention) => {
@@ -204,13 +241,13 @@ impl Client {
 
                 let nick = self.get_current_nick().await?;
 
-                self.send_msg(source.channel_id, |prefix, suffix| {
+                self.send_msg(queue, source.channel_id, |prefix, suffix| {
                     format!(
                         "{}{}{}: {}: {}",
                         prefix, user.display_name, suffix, nick, text
                     )
                 })
-                .await;
+                .await?;
             }
 
             // Seabird-sent events
@@ -229,8 +266,8 @@ impl Client {
                     .inner
                     .ok_or_else(|| format_err!("event missing inner"))?;
 
-                self.send_raw_msg(inner.channel_id.clone(), inner.text)
-                    .await;
+                self.send_raw_msg(queue, inner.channel_id.clone(), inner.text)
+                    .await?;
             }
             SeabirdEvent::PerformAction(action) => {
                 if action.sender == self.config.tag {
@@ -247,8 +284,8 @@ impl Client {
                     .inner
                     .ok_or_else(|| format_err!("event missing inner"))?;
 
-                self.perform_raw_action(inner.channel_id.clone(), inner.text)
-                    .await;
+                self.perform_raw_action(queue, inner.channel_id.clone(), inner.text)
+                    .await?;
             }
 
             // Ignore all private message types as we can't proxy those.
@@ -266,80 +303,77 @@ impl Client {
         Ok("seabird".to_string())
     }
 
-    async fn send_msg<T>(&self, source: String, cb: T)
+    async fn send_msg<T>(
+        &self,
+        queue: &mut mpsc::Sender<OutgoingMessage>,
+        source: String,
+        cb: T,
+    ) -> Result<()>
     where
         T: Fn(&str, &str) -> String,
     {
         if let Some(channels) = self.proxied_channels.read().await.get(&source) {
-            let mut inner = self.inner.lock().await;
-
             for channel in channels.iter() {
                 let text = cb(
                     channel.user_prefix.as_deref().unwrap_or(""),
                     channel.user_suffix.as_deref().unwrap_or(""),
                 );
 
-                debug!("Proxying {} to {}", text, channel.id);
+                debug!("Queuing message {} to {}", text, channel.id);
 
-                if let Err(err) = inner
-                    .send_message(proto::SendMessageRequest {
+                queue
+                    .send(OutgoingMessage::Message(proto::SendMessageRequest {
                         channel_id: channel.id.clone(),
                         text,
-                    })
-                    .await
-                {
-                    error!("Failed to send message to channel {}: {}", channel.id, err);
-                } else {
-                    debug!("Proxied message to {}", channel.id);
-                }
+                    }))
+                    .await?;
             }
         }
+
+        Ok(())
     }
 
-    async fn send_raw_msg(&self, source: String, text: String) {
+    async fn send_raw_msg(
+        &self,
+        queue: &mut mpsc::Sender<OutgoingMessage>,
+        source: String,
+        text: String,
+    ) -> Result<()> {
         if let Some(channels) = self.proxied_channels.read().await.get(&source) {
-            let mut inner = self.inner.lock().await;
-
             for channel in channels.iter() {
-                debug!("Sending {} to {}", text, channel.id);
+                debug!("Queuing message {} to {}", text, channel.id);
 
-                if let Err(err) = inner
-                    .send_message(proto::SendMessageRequest {
+                queue
+                    .send(OutgoingMessage::Message(proto::SendMessageRequest {
                         channel_id: channel.id.clone(),
                         text: text.clone(),
-                    })
-                    .await
-                {
-                    error!("Failed to send message to channel {}: {}", channel.id, err);
-                } else {
-                    debug!("Sent message to {}", channel.id);
-                }
+                    }))
+                    .await?;
             }
         }
+
+        Ok(())
     }
 
-    async fn perform_raw_action(&self, source: String, text: String) {
+    async fn perform_raw_action(
+        &self,
+        queue: &mut mpsc::Sender<OutgoingMessage>,
+        source: String,
+        text: String,
+    ) -> Result<()> {
         if let Some(channels) = self.proxied_channels.read().await.get(&source) {
-            let mut inner = self.inner.lock().await;
-
             for channel in channels.iter() {
-                debug!("Sending {} to {}", text, channel.id);
+                debug!("Queuing action {} on {}", text, channel.id);
 
-                if let Err(err) = inner
-                    .perform_action(proto::PerformActionRequest {
+                queue
+                    .send(OutgoingMessage::Action(proto::PerformActionRequest {
                         channel_id: channel.id.clone(),
                         text: text.clone(),
-                    })
-                    .await
-                {
-                    error!(
-                        "Failed to perform action on channel {}: {}",
-                        channel.id, err
-                    );
-                } else {
-                    debug!("Performed action on {}", channel.id);
-                }
+                    }))
+                    .await?;
             }
         }
+
+        Ok(())
     }
 }
