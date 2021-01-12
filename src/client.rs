@@ -129,13 +129,9 @@ impl Client {
         while let Some(event) = stream.next().await.transpose()? {
             info!("<-- {:?}", event);
 
-            if let Some(inner) = event.inner {
-                match self.handle_event(&mut queue, inner).await {
-                    Err(err) => error!("failed to handle event: {}", err),
-                    _ => {}
-                }
-            } else {
-                warn!("Got SeabirdEvent missing an inner");
+            match self.handle_event(&mut queue, event).await {
+                Err(err) => error!("failed to handle event: {}", err),
+                _ => {}
             }
         }
 
@@ -165,8 +161,24 @@ impl Client {
         queue: &mut mpsc::Sender<OutgoingMessage>,
         event: SeabirdEvent,
     ) -> Result<()> {
-        match event {
-            SeabirdEvent::Action(action) => {
+        // If the plugin requested for this event to not be proxied, we need to
+        // skip it.
+        if event
+            .tags
+            .get("proxy/skip")
+            .map(String::as_str)
+            .unwrap_or("0")
+            == "1"
+        {
+            return Ok(())
+        }
+
+        let inner = event
+            .inner
+            .ok_or_else(|| format_err!("SeabirdEvent missing an inner"))?;
+
+        match inner {
+            SeabirdEventInner::Action(action) => {
                 info!("Action: {:?}", action);
 
                 let source = action
@@ -182,7 +194,7 @@ impl Client {
                 })
                 .await?;
             }
-            SeabirdEvent::Message(message) => {
+            SeabirdEventInner::Message(message) => {
                 info!("Message: {:?}", message);
 
                 let source = message
@@ -198,7 +210,7 @@ impl Client {
                 })
                 .await?;
             }
-            SeabirdEvent::Command(command) => {
+            SeabirdEventInner::Command(command) => {
                 info!("Command: {:?}", command);
 
                 let source = command
@@ -227,7 +239,7 @@ impl Client {
                     .await?;
                 }
             }
-            SeabirdEvent::Mention(mention) => {
+            SeabirdEventInner::Mention(mention) => {
                 info!("Mention: {:?}", mention);
 
                 let source = mention
@@ -250,7 +262,7 @@ impl Client {
             }
 
             // Seabird-sent events
-            SeabirdEvent::SendMessage(message) => {
+            SeabirdEventInner::SendMessage(message) => {
                 if message.sender == self.config.tag {
                     debug!(
                         "Skipping Send Message from {}: {:?}",
@@ -261,14 +273,10 @@ impl Client {
 
                 info!("Send Message: {:?}", message);
 
-                let inner = message
-                    .inner
-                    .ok_or_else(|| format_err!("event missing inner"))?;
-
-                self.send_raw_msg(queue, inner.channel_id.clone(), inner.text)
+                self.send_raw_msg(queue, message.channel_id, message.text)
                     .await?;
             }
-            SeabirdEvent::PerformAction(action) => {
+            SeabirdEventInner::PerformAction(action) => {
                 if action.sender == self.config.tag {
                     debug!(
                         "Skipping Perform Action from {}: {:?}",
@@ -279,19 +287,15 @@ impl Client {
 
                 info!("Perform Action: {:?}", action);
 
-                let inner = action
-                    .inner
-                    .ok_or_else(|| format_err!("event missing inner"))?;
-
-                self.perform_raw_action(queue, inner.channel_id.clone(), inner.text)
+                self.perform_raw_action(queue, action.channel_id, action.text)
                     .await?;
             }
 
             // Ignore all private message types as we can't proxy those.
-            SeabirdEvent::PrivateMessage(_)
-            | SeabirdEvent::PrivateAction(_)
-            | SeabirdEvent::SendPrivateMessage(_)
-            | SeabirdEvent::PerformPrivateAction(_) => {}
+            SeabirdEventInner::PrivateMessage(_)
+            | SeabirdEventInner::PrivateAction(_)
+            | SeabirdEventInner::SendPrivateMessage(_)
+            | SeabirdEventInner::PerformPrivateAction(_) => {}
         }
 
         Ok(())
@@ -324,6 +328,7 @@ impl Client {
                     .send(OutgoingMessage::Message(proto::SendMessageRequest {
                         channel_id: channel.id.clone(),
                         text,
+                        tags: HashMap::new(),
                     }))
                     .await?;
             }
@@ -346,6 +351,7 @@ impl Client {
                     .send(OutgoingMessage::Message(proto::SendMessageRequest {
                         channel_id: channel.id.clone(),
                         text: text.clone(),
+                        tags: HashMap::new(),
                     }))
                     .await?;
             }
@@ -368,6 +374,7 @@ impl Client {
                     .send(OutgoingMessage::Action(proto::PerformActionRequest {
                         channel_id: channel.id.clone(),
                         text: text.clone(),
+                        tags: HashMap::new(),
                     }))
                     .await?;
             }
