@@ -6,4 +6,5 @@ pub use tokio::stream::{Stream, StreamExt};
 
 pub use crate::error::Result;
 pub use crate::proto;
-pub use crate::proto::event::Inner as SeabirdEvent;
+pub use crate::proto::Event as SeabirdEvent;
+pub use crate::proto::event::Inner as SeabirdEventInner;
