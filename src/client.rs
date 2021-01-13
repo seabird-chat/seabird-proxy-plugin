@@ -1,26 +1,21 @@
 use std::collections::{BTreeMap, HashMap};
 
-use http::Uri;
 use tokio::sync::{mpsc, Mutex, RwLock};
-use tonic::{
-    metadata::{Ascii, MetadataValue},
-    transport::{Channel, ClientTlsConfig},
-};
 
 use crate::prelude::*;
 
-use crate::proto::seabird::seabird_client::SeabirdClient;
-
 #[derive(Debug)]
 pub struct ClientConfig {
-    pub url: String,
-    pub token: String,
+    pub inner: seabird::ClientConfig,
     pub tag: String,
 }
 
 impl ClientConfig {
     pub fn new(url: String, token: String, tag: String) -> Self {
-        ClientConfig { url, token, tag }
+        ClientConfig {
+            inner: seabird::ClientConfig { url, token },
+            tag,
+        }
     }
 }
 
@@ -51,36 +46,13 @@ impl ChannelTarget {
 #[derive(Debug)]
 pub struct Client {
     config: ClientConfig,
-    inner: Mutex<SeabirdClient<tonic::transport::Channel>>,
+    inner: Mutex<seabird::Client>,
     proxied_channels: RwLock<BTreeMap<String, Vec<ChannelTarget>>>,
 }
 
 impl Client {
     pub async fn new(config: ClientConfig) -> Result<Arc<Self>> {
-        let uri: Uri = config.url.parse().context("failed to parse SEABIRD_URL")?;
-        let mut channel_builder = Channel::builder(uri.clone());
-
-        match uri.scheme_str() {
-            None | Some("https") => {
-                println!("Enabling tls");
-                channel_builder = channel_builder.tls_config(ClientTlsConfig::new())?;
-            }
-            _ => {}
-        }
-
-        let channel = channel_builder
-            .connect()
-            .await
-            .context("Failed to connect to seabird")?;
-
-        let auth_header: MetadataValue<Ascii> = format!("Bearer {}", config.token).parse()?;
-
-        let seabird_client =
-            SeabirdClient::with_interceptor(channel, move |mut req: tonic::Request<()>| {
-                req.metadata_mut()
-                    .insert("authorization", auth_header.clone());
-                Ok(req)
-            });
+        let seabird_client = seabird::Client::new(config.inner.clone()).await?;
 
         Ok(Arc::new(Client {
             config,
@@ -111,18 +83,16 @@ impl Client {
     async fn run_reader(&self, mut queue: mpsc::Sender<OutgoingMessage>) -> Result<()> {
         debug!("Getting stream");
 
-        let mut stream = {
-            // We need to make sure the lock is dropped, so we can use the
-            // client to make requests later.
-            let mut inner = self.inner.lock().await;
-
-            inner
-                .stream_events(proto::StreamEventsRequest {
-                    commands: HashMap::new(),
-                })
-                .await?
-                .into_inner()
-        };
+        let mut stream = self
+            .inner
+            .lock()
+            .await
+            .inner_mut_ref()
+            .stream_events(proto::StreamEventsRequest {
+                commands: HashMap::new(),
+            })
+            .await?
+            .into_inner();
 
         debug!("Got stream");
 
@@ -144,12 +114,16 @@ impl Client {
                 Some(OutgoingMessage::Action(action)) => {
                     let mut inner = self.inner.lock().await;
                     debug!("Performing action {} on {}", action.text, action.channel_id);
-                    inner.perform_action(action).await?;
+                    inner
+                        .perform_action(action.channel_id, action.text, None)
+                        .await?;
                 }
                 Some(OutgoingMessage::Message(message)) => {
                     let mut inner = self.inner.lock().await;
                     debug!("Sending message {} to {}", message.text, message.channel_id);
-                    inner.send_message(message).await?;
+                    inner
+                        .send_message(message.channel_id, message.text, None)
+                        .await?;
                 }
                 None => return Err(format_err!("run_writer exited early")),
             }
@@ -170,7 +144,7 @@ impl Client {
             .unwrap_or("0")
             == "1"
         {
-            return Ok(())
+            return Ok(());
         }
 
         let inner = event
