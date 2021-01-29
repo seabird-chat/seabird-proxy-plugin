@@ -147,6 +147,8 @@ impl Client {
             return Ok(());
         }
 
+        let tags = event.tags;
+
         let inner = event
             .inner
             .ok_or_else(|| format_err!("SeabirdEvent missing an inner"))?;
@@ -163,7 +165,7 @@ impl Client {
                     .ok_or_else(|| format_err!("event missing user"))?;
                 let text = action.text;
 
-                self.send_msg(queue, source.channel_id, |prefix, suffix| {
+                self.send_msg(queue, source.channel_id, &tags, |prefix, suffix| {
                     format!("* {}{}{} {}", prefix, user.display_name, suffix, text)
                 })
                 .await?;
@@ -179,7 +181,7 @@ impl Client {
                     .ok_or_else(|| format_err!("event missing user"))?;
                 let text = message.text;
 
-                self.send_msg(queue, source.channel_id, |prefix, suffix| {
+                self.send_msg(queue, source.channel_id, &tags, |prefix, suffix| {
                     format!("{}{}{}: {}", prefix, user.display_name, suffix, text)
                 })
                 .await?;
@@ -199,7 +201,7 @@ impl Client {
 
                 // TODO: maybe pull command prefix from some other API?
                 if arg != "" {
-                    self.send_msg(queue, source.channel_id, |prefix, suffix| {
+                    self.send_msg(queue, source.channel_id, &tags, |prefix, suffix| {
                         format!(
                             "{}{}{}: !{} {}",
                             prefix, user.display_name, suffix, cmd, arg
@@ -207,7 +209,7 @@ impl Client {
                     })
                     .await?;
                 } else {
-                    self.send_msg(queue, source.channel_id, |prefix, suffix| {
+                    self.send_msg(queue, source.channel_id, &tags, |prefix, suffix| {
                         format!("{}{}{}: !{}", prefix, user.display_name, suffix, cmd)
                     })
                     .await?;
@@ -226,7 +228,7 @@ impl Client {
 
                 let nick = self.get_current_nick().await?;
 
-                self.send_msg(queue, source.channel_id, |prefix, suffix| {
+                self.send_msg(queue, source.channel_id, &tags, |prefix, suffix| {
                     format!(
                         "{}{}{}: {}: {}",
                         prefix, user.display_name, suffix, nick, text
@@ -247,7 +249,7 @@ impl Client {
 
                 info!("Send Message: {:?}", message);
 
-                self.send_raw_msg(queue, message.channel_id, message.text)
+                self.send_raw_msg(queue, message.channel_id, &tags, message.text)
                     .await?;
             }
             SeabirdEventInner::PerformAction(action) => {
@@ -261,7 +263,7 @@ impl Client {
 
                 info!("Perform Action: {:?}", action);
 
-                self.perform_raw_action(queue, action.channel_id, action.text)
+                self.perform_raw_action(queue, action.channel_id, &tags, action.text)
                     .await?;
             }
 
@@ -284,6 +286,7 @@ impl Client {
         &self,
         queue: &mut mpsc::Sender<OutgoingMessage>,
         source: String,
+        tags: &HashMap<String, String>,
         cb: T,
     ) -> Result<()>
     where
@@ -302,7 +305,7 @@ impl Client {
                     .send(OutgoingMessage::Message(proto::SendMessageRequest {
                         channel_id: channel.id.clone(),
                         text,
-                        tags: HashMap::new(),
+                        tags: tags.clone(),
                     }))
                     .await?;
             }
@@ -315,6 +318,7 @@ impl Client {
         &self,
         queue: &mut mpsc::Sender<OutgoingMessage>,
         source: String,
+        tags: &HashMap<String, String>,
         text: String,
     ) -> Result<()> {
         if let Some(channels) = self.proxied_channels.read().await.get(&source) {
@@ -325,7 +329,7 @@ impl Client {
                     .send(OutgoingMessage::Message(proto::SendMessageRequest {
                         channel_id: channel.id.clone(),
                         text: text.clone(),
-                        tags: HashMap::new(),
+                        tags: tags.clone(),
                     }))
                     .await?;
             }
@@ -338,6 +342,7 @@ impl Client {
         &self,
         queue: &mut mpsc::Sender<OutgoingMessage>,
         source: String,
+        tags: &HashMap<String, String>,
         text: String,
     ) -> Result<()> {
         if let Some(channels) = self.proxied_channels.read().await.get(&source) {
@@ -348,7 +353,7 @@ impl Client {
                     .send(OutgoingMessage::Action(proto::PerformActionRequest {
                         channel_id: channel.id.clone(),
                         text: text.clone(),
-                        tags: HashMap::new(),
+                        tags: tags.clone(),
                     }))
                     .await?;
             }
