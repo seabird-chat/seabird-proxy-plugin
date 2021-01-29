@@ -115,14 +115,14 @@ impl Client {
                     let mut inner = self.inner.lock().await;
                     debug!("Performing action {} on {}", action.text, action.channel_id);
                     inner
-                        .perform_action(action.channel_id, action.text, None)
+                        .perform_action(action.channel_id, action.text, Some(action.tags))
                         .await?;
                 }
                 Some(OutgoingMessage::Message(message)) => {
                     let mut inner = self.inner.lock().await;
                     debug!("Sending message {} to {}", message.text, message.channel_id);
                     inner
-                        .send_message(message.channel_id, message.text, None)
+                        .send_message(message.channel_id, message.text, Some(message.tags))
                         .await?;
                 }
                 None => return Err(format_err!("run_writer exited early")),
@@ -155,7 +155,7 @@ impl Client {
 
         match inner {
             SeabirdEventInner::Action(action) => {
-                info!("Action: {:?}", action);
+                info!("Action: {:?}, Tags: {:?}", action, tags);
 
                 let source = action
                     .source
@@ -171,7 +171,7 @@ impl Client {
                 .await?;
             }
             SeabirdEventInner::Message(message) => {
-                info!("Message: {:?}", message);
+                info!("Message: {:?}, Tags: {:?}", message, tags);
 
                 let source = message
                     .source
@@ -187,7 +187,7 @@ impl Client {
                 .await?;
             }
             SeabirdEventInner::Command(command) => {
-                info!("Command: {:?}", command);
+                info!("Command: {:?}, Tags: {:?}", command, tags);
 
                 let source = command
                     .source
@@ -216,7 +216,7 @@ impl Client {
                 }
             }
             SeabirdEventInner::Mention(mention) => {
-                info!("Mention: {:?}", mention);
+                info!("Mention: {:?}, Tags: {:?}", mention, tags);
 
                 let source = mention
                     .source
@@ -247,7 +247,7 @@ impl Client {
                     return Ok(());
                 }
 
-                info!("Send Message: {:?}", message);
+                info!("Send Message: {:?}, Tags: {:?}", message, tags);
 
                 self.send_raw_msg(queue, message.channel_id, &tags, message.text)
                     .await?;
@@ -261,7 +261,7 @@ impl Client {
                     return Ok(());
                 }
 
-                info!("Perform Action: {:?}", action);
+                info!("Perform Action: {:?}, Tags: {:?}", action, tags);
 
                 self.perform_raw_action(queue, action.channel_id, &tags, action.text)
                     .await?;
