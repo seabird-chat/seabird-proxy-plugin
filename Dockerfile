@@ -1,15 +1,12 @@
-FROM rust:1.68 as builder
-WORKDIR /usr/src/seabird-rs
+FROM rust:1.68-bullseye as builder
 
-# NOTE: tonic_build uses rustfmt to properly format the output files and give
-# better errors.
-RUN rustup component add rustfmt
+RUN apt-get update && apt-get install -y protobuf-compiler && rm -rf /var/lib/apt/lists/*
 
 # Copy over only the files which specify dependencies
-COPY Cargo.toml Cargo.lock ./
+COPY ./Cargo.toml ./Cargo.lock ./
 
 # We need to create a dummy main in order to get this to properly build.
-RUN mkdir src /tmp/seabird-target && echo 'fn main() {}' > src/main.rs && cargo build --release
+RUN mkdir src && echo 'fn main() {}' > src/main.rs && cargo build --release
 
 # Copy over the files to actually build the application.
 COPY . .
@@ -19,8 +16,9 @@ COPY . .
 RUN touch src/main.rs && cargo build --release && cp -v target/release/seabird-proxy-plugin /usr/local/bin
 
 # Create a new base and copy in only what we need.
-FROM debian:buster-slim
+FROM debian:bullseye-slim
 ENV RUST_LOG=info
 RUN apt-get update && apt-get install -y libssl1.1 ca-certificates && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /usr/local/bin/seabird-proxy-plugin /usr/local/bin/seabird-proxy-plugin
+EXPOSE 11235
 CMD ["seabird-proxy-plugin"]
