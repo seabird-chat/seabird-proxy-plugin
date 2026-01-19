@@ -46,13 +46,13 @@ impl ChannelTarget {
 #[derive(Debug)]
 pub struct Client {
     config: ClientConfig,
-    inner: Mutex<seabird::Client>,
+    inner: Mutex<seabird::SeabirdClient>,
     proxied_channels: RwLock<BTreeMap<String, Vec<ChannelTarget>>>,
 }
 
 impl Client {
     pub async fn new(config: ClientConfig) -> Result<Arc<Self>> {
-        let seabird_client = seabird::Client::new(config.inner.clone()).await?;
+        let seabird_client = seabird::SeabirdClient::new(config.inner.clone()).await?;
 
         Ok(Arc::new(Client {
             config,
@@ -305,6 +305,7 @@ impl Client {
                     .send(OutgoingMessage::Message(proto::SendMessageRequest {
                         channel_id: channel.id.clone(),
                         text,
+                        root_block: None,
                         tags: tags.clone(),
                     }))
                     .await?;
@@ -329,6 +330,7 @@ impl Client {
                     .send(OutgoingMessage::Message(proto::SendMessageRequest {
                         channel_id: channel.id.clone(),
                         text: text.clone(),
+                        root_block: None,
                         tags: tags.clone(),
                     }))
                     .await?;
@@ -353,6 +355,7 @@ impl Client {
                     .send(OutgoingMessage::Action(proto::PerformActionRequest {
                         channel_id: channel.id.clone(),
                         text: text.clone(),
+                        root_block: None,
                         tags: tags.clone(),
                     }))
                     .await?;

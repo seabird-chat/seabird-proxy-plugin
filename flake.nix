@@ -1,40 +1,26 @@
 {
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    flake-utils.url = "github:numtide/flake-utils";
-    rust-overlay = {
-      url = "github:oxalica/rust-overlay";
-      inputs = {
-        nixpkgs.follows = "nixpkgs";
-        flake-utils.follows = "flake-utils";
-      };
-    };
+    flake-parts.url = "github:hercules-ci/flake-parts";
   };
 
-  outputs = { self, nixpkgs, rust-overlay, flake-utils }:
-    flake-utils.lib.eachDefaultSystem
-      (system:
-        let
-          pkgs = import nixpkgs {
-            inherit system;
-            overlays = [ (import rust-overlay) ];
-          };
-        in
-        {
-          devShells.default = pkgs.mkShell {
-            buildInputs = [
-              pkgs.darwin.apple_sdk.frameworks.SystemConfiguration
-            ];
+  outputs = inputs@{ self, nixpkgs, flake-parts }:
+    flake-parts.lib.mkFlake { inherit inputs; } {
+      systems = nixpkgs.lib.systems.flakeExposed;
 
-            nativeBuildInputs = [
-              (pkgs.rust-bin.stable."1.71.1".default.override {
-                extensions = ["rust-src"];
-              })
-              pkgs.rust-analyzer
-            ];
+      perSystem = { pkgs, ... }: {
+        devShells.default = pkgs.mkShell {
+          packages = [
+            pkgs.cargo
+            pkgs.rustc
+            pkgs.protobuf
+            pkgs.rust-analyzer
+          ];
 
-            RUST_BACKTRACE = 1;
-          };
-        }
-      );
+          shellHook = ''
+            export RUST_BACKTRACE=1
+          '';
+        };
+      };
+    };
 }
