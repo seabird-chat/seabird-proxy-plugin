@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
-use tokio::signal::unix::{signal, SignalKind};
+use tokio::signal::unix::{SignalKind, signal};
 
 mod client;
 mod prelude;
@@ -81,7 +81,7 @@ async fn main() -> error::Result<()> {
             .context("Missing $SEABIRD_HOST. You must specify a Seabird host.")?,
         dotenv::var("SEABIRD_TOKEN")
             .context("Missing $SEABIRD_TOKEN. You must specify a valid auth token.")?,
-        dotenv::var("PROXY_TAG").unwrap_or_else(|_| "proxy".to_string())
+        dotenv::var("PROXY_TAG").unwrap_or_else(|_| "proxy".to_string()),
     );
 
     let client = client::Client::new(config).await?;

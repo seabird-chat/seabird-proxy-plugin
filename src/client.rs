@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 
-use tokio::sync::{mpsc, Mutex, RwLock};
+use tokio::sync::{Mutex, RwLock, mpsc};
 
 use crate::prelude::*;
 

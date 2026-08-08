@@ -1,6 +1,6 @@
 pub use std::sync::Arc;
 
-pub use anyhow::{format_err, Context as AnyhowContext};
+pub use anyhow::{Context as AnyhowContext, format_err};
 pub use log::{debug, error, info, warn};
 pub use tokio_stream::{Stream, StreamExt};
 
