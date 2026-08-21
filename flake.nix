@@ -21,7 +21,7 @@
           formatter = pkgs.treefmt.withConfig {
             runtimeInputs = [
               pkgs.nixfmt
-              pkgs.rustfmt
+              pkgs.gotools
             ];
 
             settings = {
@@ -32,32 +32,35 @@
                 includes = [ "*.nix" ];
               };
 
-              formatter.rustfmt = {
-                command = "rustfmt";
-                includes = [ "*.rs" ];
+              formatter.goimports = {
+                command = "goimports";
+                options = [ "-w" ];
+                includes = [ "*.go" ];
               };
             };
           };
 
-          packages.default = pkgs.rustPlatform.buildRustPackage {
+          packages.default = pkgs.buildGoModule rec {
             pname = "seabird-proxy-plugin";
-            version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).package.version;
+            version = "0.1.2-dev";
+
             src = ./.;
-            cargoLock.lockFile = ./Cargo.lock;
-            nativeBuildInputs = [ pkgs.protobuf ];
+
+            vendorHash = "sha256-4V5qY9pWlY4ibobc4oEy6htG233NaJfGgVQr+hvOAJU=";
+
+            subPackages = [ "cmd/${pname}" ];
+
+            ldflags = [
+              "-s"
+              "-w"
+            ];
           };
 
           devShells.default = pkgs.mkShell {
-            packages = [
-              pkgs.cargo
-              pkgs.rustc
-              pkgs.protobuf
-              pkgs.rust-analyzer
+            nativeBuildInputs = [
+              pkgs.go
+              pkgs.gopls
             ];
-
-            shellHook = ''
-              export RUST_BACKTRACE=1
-            '';
           };
         };
     };
