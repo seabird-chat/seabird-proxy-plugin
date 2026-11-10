@@ -114,16 +114,24 @@ impl Client {
                 Some(OutgoingMessage::Action(action)) => {
                     let mut inner = self.inner.lock().await;
                     debug!("Performing action {} on {}", action.text, action.channel_id);
-                    inner
+                    let channel_id = action.channel_id.clone();
+                    if let Err(err) = inner
                         .perform_action(action.channel_id, action.text, Some(action.tags))
-                        .await?;
+                        .await
+                    {
+                        warn!("failed to perform action on {}: {}", channel_id, err);
+                    }
                 }
                 Some(OutgoingMessage::Message(message)) => {
                     let mut inner = self.inner.lock().await;
                     debug!("Sending message {} to {}", message.text, message.channel_id);
-                    inner
+                    let channel_id = message.channel_id.clone();
+                    if let Err(err) = inner
                         .send_message(message.channel_id, message.text, Some(message.tags))
-                        .await?;
+                        .await
+                    {
+                        warn!("failed to send message to {}: {}", channel_id, err);
+                    }
                 }
                 None => return Err(format_err!("run_writer exited early")),
             }
