@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 
-use tokio::sync::{mpsc, Mutex, RwLock};
+use tokio::sync::{Mutex, RwLock, mpsc};
 
 use crate::prelude::*;
 
@@ -25,20 +25,74 @@ enum OutgoingMessage {
     Message(proto::SendMessageRequest),
 }
 
+// Formatting applied to the prefix + username + suffix of proxied messages.
+// Multiple styles nest, with the first listed innermost.
+#[derive(Clone, Copy, Debug, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UserStyle {
+    Bold,
+    Italics,
+    Underline,
+    Strikethrough,
+}
+
 #[derive(Debug)]
 pub struct ChannelTarget {
     id: String,
     user_prefix: Option<String>,
     user_suffix: Option<String>,
+    user_style: Vec<UserStyle>,
 }
 
 impl ChannelTarget {
-    pub fn new(id: String, user_prefix: Option<String>, user_suffix: Option<String>) -> Self {
+    pub fn new(
+        id: String,
+        user_prefix: Option<String>,
+        user_suffix: Option<String>,
+        user_style: Vec<UserStyle>,
+    ) -> Self {
         ChannelTarget {
             id,
             user_prefix,
             user_suffix,
+            user_style,
         }
+    }
+
+    // Builds the head block: lead, the styled label (prefix + name + suffix),
+    // then tail. Returns the block and its plain text.
+    fn head(&self, lead: &str, name: &str, tail: &str) -> (seabird::Block, String) {
+        let label = format!(
+            "{}{}{}",
+            self.user_prefix.as_deref().unwrap_or(""),
+            name,
+            self.user_suffix.as_deref().unwrap_or("")
+        );
+        let plain = format!("{}{}{}", lead, label, tail);
+
+        let styled =
+            self.user_style
+                .iter()
+                .fold(
+                    seabird::Block::new().text(label),
+                    |inner, style| match style {
+                        UserStyle::Bold => seabird::Block::new().bold(inner),
+                        UserStyle::Italics => seabird::Block::new().italic(inner),
+                        UserStyle::Underline => seabird::Block::new().underline(inner),
+                        UserStyle::Strikethrough => seabird::Block::new().strikethrough(inner),
+                    },
+                );
+
+        let mut head = seabird::Block::new();
+        if !lead.is_empty() {
+            head = head.text(lead);
+        }
+        head = head.append(styled);
+        if !tail.is_empty() {
+            head = head.text(tail);
+        }
+
+        (head, plain)
     }
 }
 
@@ -184,7 +238,9 @@ impl Client {
                     queue,
                     source.channel_id,
                     &tags,
-                    |prefix, suffix| format!("* {}{}{} ", prefix, user.display_name, suffix),
+                    "* ",
+                    &user.display_name,
+                    " ",
                     action.text,
                     action.root_block,
                 )
@@ -204,7 +260,9 @@ impl Client {
                     queue,
                     source.channel_id,
                     &tags,
-                    |prefix, suffix| format!("{}{}{}: ", prefix, user.display_name, suffix),
+                    "",
+                    &user.display_name,
+                    ": ",
                     message.text,
                     message.root_block,
                 )
@@ -230,12 +288,13 @@ impl Client {
                     format!("!{}", cmd)
                 };
 
-                // Commands have no block, so these are proxied as plain text.
                 self.send_msg(
                     queue,
                     source.channel_id,
                     &tags,
-                    |prefix, suffix| format!("{}{}{}: ", prefix, user.display_name, suffix),
+                    "",
+                    &user.display_name,
+                    ": ",
                     body,
                     None,
                 )
@@ -257,9 +316,9 @@ impl Client {
                     queue,
                     source.channel_id,
                     &tags,
-                    |prefix, suffix| {
-                        format!("{}{}{}: {}: ", prefix, user.display_name, suffix, nick)
-                    },
+                    "",
+                    &user.display_name,
+                    &format!(": {}: ", nick),
                     mention.text,
                     mention.root_block,
                 )
@@ -323,28 +382,31 @@ impl Client {
         Ok("seabird".to_string())
     }
 
-    // Sends head + body (and head + block, if there is one) to each target.
-    // The head is built per target from its user prefix and suffix.
-    async fn send_msg<T>(
+    // Sends a head followed by the body to each target. The head is built per
+    // target so it can carry that target's prefix, suffix, and style.
+    #[allow(clippy::too_many_arguments)]
+    async fn send_msg(
         &self,
         queue: &mut mpsc::Sender<OutgoingMessage>,
         source: String,
         tags: &HashMap<String, String>,
-        head: T,
+        lead: &str,
+        name: &str,
+        tail: &str,
         body: String,
         block: Option<proto::Block>,
-    ) -> Result<()>
-    where
-        T: Fn(&str, &str) -> String,
-    {
+    ) -> Result<()> {
         if let Some(channels) = self.proxied_channels.read().await.get(&source) {
             for channel in channels.iter() {
-                let head = head(
-                    channel.user_prefix.as_deref().unwrap_or(""),
-                    channel.user_suffix.as_deref().unwrap_or(""),
-                );
-                let text = format!("{}{}", head, body);
-                let root_block = block.clone().map(|b| prepend_text(head, b));
+                let (head, plain_head) = channel.head(lead, name, tail);
+                let text = format!("{}{}", plain_head, body);
+
+                // Events without a block (such as commands) are wrapped as text.
+                let body_block = match block.clone() {
+                    Some(block) => seabird::Block::from(block),
+                    None => seabird::Block::new().text(body.clone()),
+                };
+                let root_block = Some(head.append(body_block).into());
 
                 debug!("Queuing message {} to {}", text, channel.id);
 
@@ -415,50 +477,77 @@ impl Client {
     }
 }
 
-// Wraps block in a container preceded by a text block containing head. Core
-// recomputes the plain fields, but we fill them in anyway.
-fn prepend_text(head: String, block: proto::Block) -> proto::Block {
-    let plain = format!("{}{}", head, block.plain);
-    let head_block = proto::Block {
-        plain: head.clone(),
-        inner: Some(proto::block::Inner::Text(proto::TextBlock { text: head })),
-    };
-
-    proto::Block {
-        plain,
-        inner: Some(proto::block::Inner::Container(proto::ContainerBlock {
-            inner: vec![head_block, block],
-        })),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn prepend_text_wraps_block() {
-        let bold = proto::Block {
-            plain: "hi".to_string(),
-            inner: Some(proto::block::Inner::Bold(Box::new(proto::BoldBlock {
-                inner: Some(Box::new(proto::Block {
-                    plain: "hi".to_string(),
-                    inner: Some(proto::block::Inner::Text(proto::TextBlock {
-                        text: "hi".to_string(),
-                    })),
-                })),
-            }))),
-        };
+    fn target(style: Vec<UserStyle>) -> ChannelTarget {
+        ChannelTarget::new(
+            "irc://x/#c".to_string(),
+            Some("<".to_string()),
+            Some(">".to_string()),
+            style,
+        )
+    }
 
-        let out = prepend_text("bob: ".to_string(), bold.clone());
-        assert_eq!(out.plain, "bob: hi");
-        match out.inner {
-            Some(proto::block::Inner::Container(c)) => {
-                assert_eq!(c.inner.len(), 2);
-                assert_eq!(c.inner[0].plain, "bob: ");
-                assert_eq!(c.inner[1], bold);
-            }
-            other => panic!("expected container, got {:?}", other),
+    #[test]
+    fn head_applies_style_to_label_only() {
+        let (head, plain) = target(vec![UserStyle::Bold]).head("* ", "bob", " ");
+        assert_eq!(plain, "* <bob> ");
+
+        let block: proto::Block = head.into();
+        let Some(proto::block::Inner::Container(c)) = block.inner else {
+            panic!("expected container");
+        };
+        assert_eq!(c.inner.len(), 3);
+        assert!(matches!(
+            c.inner[0].inner,
+            Some(proto::block::Inner::Text(_))
+        ));
+        match &c.inner[1].inner {
+            Some(proto::block::Inner::Bold(b)) => match b.inner.as_ref().unwrap().inner {
+                Some(proto::block::Inner::Text(ref t)) => assert_eq!(t.text, "<bob>"),
+                ref other => panic!("expected text, got {:?}", other),
+            },
+            other => panic!("expected bold, got {:?}", other),
         }
+        assert!(matches!(
+            c.inner[2].inner,
+            Some(proto::block::Inner::Text(_))
+        ));
+    }
+
+    #[test]
+    fn head_nests_multiple_styles() {
+        let (head, _) = target(vec![UserStyle::Bold, UserStyle::Italics]).head("", "bob", "");
+        let block: proto::Block = head.into();
+        // Italics wraps bold, which wraps the text.
+        let Some(proto::block::Inner::Italics(i)) = block.inner else {
+            panic!("expected italics, got {:?}", block.inner);
+        };
+        let Some(proto::block::Inner::Bold(b)) = i.inner.unwrap().inner else {
+            panic!("expected bold");
+        };
+        assert!(matches!(
+            b.inner.unwrap().inner,
+            Some(proto::block::Inner::Text(_))
+        ));
+    }
+
+    #[test]
+    fn head_without_style_is_text() {
+        let (head, plain) = target(vec![]).head("", "bob", ": ");
+        assert_eq!(plain, "<bob>: ");
+
+        let block: proto::Block = head.into();
+        let Some(proto::block::Inner::Container(c)) = block.inner else {
+            panic!("expected container");
+        };
+        assert_eq!(c.inner.len(), 2);
+        assert!(
+            c.inner
+                .iter()
+                .all(|b| matches!(b.inner, Some(proto::block::Inner::Text(_))))
+        );
     }
 }

@@ -20,6 +20,8 @@ struct ProxiedChannel {
     target: String,
     user_prefix: Option<String>,
     user_suffix: Option<String>,
+    #[serde(default)]
+    user_style: Vec<client::UserStyle>,
 }
 
 #[derive(serde::Deserialize)]
@@ -44,6 +46,7 @@ async fn read_config(filename: &str) -> Result<BTreeMap<String, Vec<client::Chan
                 channel.target,
                 channel.user_prefix,
                 channel.user_suffix,
+                channel.user_style,
             ));
     }
 
