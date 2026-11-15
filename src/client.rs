@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 
-use tokio::sync::{Mutex, RwLock, mpsc};
+use tokio::sync::{mpsc, Mutex, RwLock};
 
 use crate::prelude::*;
 
@@ -116,7 +116,11 @@ impl Client {
                     debug!("Performing action {} on {}", action.text, action.channel_id);
                     let channel_id = action.channel_id.clone();
                     if let Err(err) = inner
-                        .perform_action(action.channel_id, action.text, Some(action.tags))
+                        .perform_action(
+                            action.channel_id,
+                            seabird::MessageContent::new(action.text, action.root_block),
+                            Some(action.tags),
+                        )
                         .await
                     {
                         warn!("failed to perform action on {}: {}", channel_id, err);
@@ -127,7 +131,11 @@ impl Client {
                     debug!("Sending message {} to {}", message.text, message.channel_id);
                     let channel_id = message.channel_id.clone();
                     if let Err(err) = inner
-                        .send_message(message.channel_id, message.text, Some(message.tags))
+                        .send_message(
+                            message.channel_id,
+                            seabird::MessageContent::new(message.text, message.root_block),
+                            Some(message.tags),
+                        )
                         .await
                     {
                         warn!("failed to send message to {}: {}", channel_id, err);
@@ -171,11 +179,15 @@ impl Client {
                 let user = source
                     .user
                     .ok_or_else(|| format_err!("event missing user"))?;
-                let text = action.text;
 
-                self.send_msg(queue, source.channel_id, &tags, |prefix, suffix| {
-                    format!("* {}{}{} {}", prefix, user.display_name, suffix, text)
-                })
+                self.send_msg(
+                    queue,
+                    source.channel_id,
+                    &tags,
+                    |prefix, suffix| format!("* {}{}{} ", prefix, user.display_name, suffix),
+                    action.text,
+                    action.root_block,
+                )
                 .await?;
             }
             SeabirdEventInner::Message(message) => {
@@ -187,11 +199,15 @@ impl Client {
                 let user = source
                     .user
                     .ok_or_else(|| format_err!("event missing user"))?;
-                let text = message.text;
 
-                self.send_msg(queue, source.channel_id, &tags, |prefix, suffix| {
-                    format!("{}{}{}: {}", prefix, user.display_name, suffix, text)
-                })
+                self.send_msg(
+                    queue,
+                    source.channel_id,
+                    &tags,
+                    |prefix, suffix| format!("{}{}{}: ", prefix, user.display_name, suffix),
+                    message.text,
+                    message.root_block,
+                )
                 .await?;
             }
             SeabirdEventInner::Command(command) => {
@@ -208,20 +224,22 @@ impl Client {
                 let arg = command.arg;
 
                 // TODO: maybe pull command prefix from some other API?
-                if arg != "" {
-                    self.send_msg(queue, source.channel_id, &tags, |prefix, suffix| {
-                        format!(
-                            "{}{}{}: !{} {}",
-                            prefix, user.display_name, suffix, cmd, arg
-                        )
-                    })
-                    .await?;
+                let body = if arg != "" {
+                    format!("!{} {}", cmd, arg)
                 } else {
-                    self.send_msg(queue, source.channel_id, &tags, |prefix, suffix| {
-                        format!("{}{}{}: !{}", prefix, user.display_name, suffix, cmd)
-                    })
-                    .await?;
-                }
+                    format!("!{}", cmd)
+                };
+
+                // Commands have no block, so these are proxied as plain text.
+                self.send_msg(
+                    queue,
+                    source.channel_id,
+                    &tags,
+                    |prefix, suffix| format!("{}{}{}: ", prefix, user.display_name, suffix),
+                    body,
+                    None,
+                )
+                .await?;
             }
             SeabirdEventInner::Mention(mention) => {
                 info!("Mention: {:?}, Tags: {:?}", mention, tags);
@@ -232,16 +250,19 @@ impl Client {
                 let user = source
                     .user
                     .ok_or_else(|| format_err!("event missing user"))?;
-                let text = mention.text;
 
                 let nick = self.get_current_nick().await?;
 
-                self.send_msg(queue, source.channel_id, &tags, |prefix, suffix| {
-                    format!(
-                        "{}{}{}: {}: {}",
-                        prefix, user.display_name, suffix, nick, text
-                    )
-                })
+                self.send_msg(
+                    queue,
+                    source.channel_id,
+                    &tags,
+                    |prefix, suffix| {
+                        format!("{}{}{}: {}: ", prefix, user.display_name, suffix, nick)
+                    },
+                    mention.text,
+                    mention.root_block,
+                )
                 .await?;
             }
 
@@ -257,8 +278,14 @@ impl Client {
 
                 info!("Send Message: {:?}, Tags: {:?}", message, tags);
 
-                self.send_raw_msg(queue, message.channel_id, &tags, message.text)
-                    .await?;
+                self.send_raw_msg(
+                    queue,
+                    message.channel_id,
+                    &tags,
+                    message.text,
+                    message.root_block,
+                )
+                .await?;
             }
             SeabirdEventInner::PerformAction(action) => {
                 if action.sender == self.config.tag {
@@ -271,8 +298,14 @@ impl Client {
 
                 info!("Perform Action: {:?}, Tags: {:?}", action, tags);
 
-                self.perform_raw_action(queue, action.channel_id, &tags, action.text)
-                    .await?;
+                self.perform_raw_action(
+                    queue,
+                    action.channel_id,
+                    &tags,
+                    action.text,
+                    action.root_block,
+                )
+                .await?;
             }
 
             // Ignore all private message types as we can't proxy those.
@@ -290,22 +323,28 @@ impl Client {
         Ok("seabird".to_string())
     }
 
+    // Sends head + body (and head + block, if there is one) to each target.
+    // The head is built per target from its user prefix and suffix.
     async fn send_msg<T>(
         &self,
         queue: &mut mpsc::Sender<OutgoingMessage>,
         source: String,
         tags: &HashMap<String, String>,
-        cb: T,
+        head: T,
+        body: String,
+        block: Option<proto::Block>,
     ) -> Result<()>
     where
         T: Fn(&str, &str) -> String,
     {
         if let Some(channels) = self.proxied_channels.read().await.get(&source) {
             for channel in channels.iter() {
-                let text = cb(
+                let head = head(
                     channel.user_prefix.as_deref().unwrap_or(""),
                     channel.user_suffix.as_deref().unwrap_or(""),
                 );
+                let text = format!("{}{}", head, body);
+                let root_block = block.clone().map(|b| prepend_text(head, b));
 
                 debug!("Queuing message {} to {}", text, channel.id);
 
@@ -313,7 +352,7 @@ impl Client {
                     .send(OutgoingMessage::Message(proto::SendMessageRequest {
                         channel_id: channel.id.clone(),
                         text,
-                        root_block: None,
+                        root_block,
                         tags: tags.clone(),
                     }))
                     .await?;
@@ -329,6 +368,7 @@ impl Client {
         source: String,
         tags: &HashMap<String, String>,
         text: String,
+        root_block: Option<proto::Block>,
     ) -> Result<()> {
         if let Some(channels) = self.proxied_channels.read().await.get(&source) {
             for channel in channels.iter() {
@@ -338,7 +378,7 @@ impl Client {
                     .send(OutgoingMessage::Message(proto::SendMessageRequest {
                         channel_id: channel.id.clone(),
                         text: text.clone(),
-                        root_block: None,
+                        root_block: root_block.clone(),
                         tags: tags.clone(),
                     }))
                     .await?;
@@ -354,6 +394,7 @@ impl Client {
         source: String,
         tags: &HashMap<String, String>,
         text: String,
+        root_block: Option<proto::Block>,
     ) -> Result<()> {
         if let Some(channels) = self.proxied_channels.read().await.get(&source) {
             for channel in channels.iter() {
@@ -363,7 +404,7 @@ impl Client {
                     .send(OutgoingMessage::Action(proto::PerformActionRequest {
                         channel_id: channel.id.clone(),
                         text: text.clone(),
-                        root_block: None,
+                        root_block: root_block.clone(),
                         tags: tags.clone(),
                     }))
                     .await?;
@@ -371,5 +412,53 @@ impl Client {
         }
 
         Ok(())
+    }
+}
+
+// Wraps block in a container preceded by a text block containing head. Core
+// recomputes the plain fields, but we fill them in anyway.
+fn prepend_text(head: String, block: proto::Block) -> proto::Block {
+    let plain = format!("{}{}", head, block.plain);
+    let head_block = proto::Block {
+        plain: head.clone(),
+        inner: Some(proto::block::Inner::Text(proto::TextBlock { text: head })),
+    };
+
+    proto::Block {
+        plain,
+        inner: Some(proto::block::Inner::Container(proto::ContainerBlock {
+            inner: vec![head_block, block],
+        })),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prepend_text_wraps_block() {
+        let bold = proto::Block {
+            plain: "hi".to_string(),
+            inner: Some(proto::block::Inner::Bold(Box::new(proto::BoldBlock {
+                inner: Some(Box::new(proto::Block {
+                    plain: "hi".to_string(),
+                    inner: Some(proto::block::Inner::Text(proto::TextBlock {
+                        text: "hi".to_string(),
+                    })),
+                })),
+            }))),
+        };
+
+        let out = prepend_text("bob: ".to_string(), bold.clone());
+        assert_eq!(out.plain, "bob: hi");
+        match out.inner {
+            Some(proto::block::Inner::Container(c)) => {
+                assert_eq!(c.inner.len(), 2);
+                assert_eq!(c.inner[0].plain, "bob: ");
+                assert_eq!(c.inner[1], bold);
+            }
+            other => panic!("expected container, got {:?}", other),
+        }
     }
 }
