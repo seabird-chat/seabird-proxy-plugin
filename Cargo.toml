@@ -1,6 +1,6 @@
 [package]
 name = "seabird-proxy-plugin"
-version = "0.1.2-dev"
+version = "0.1.3"
 authors = ["Kaleb Elwert <belak@coded.io>"]
 edition = "2018"
 
