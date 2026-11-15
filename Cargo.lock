@@ -941,7 +941,7 @@ dependencies = [
 
 [[package]]
 name = "seabird-proxy-plugin"
-version = "0.1.3"
+version = "0.1.4-dev"
 dependencies = [
  "anyhow",
  "dotenv",
